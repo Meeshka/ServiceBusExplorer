@@ -184,16 +184,13 @@
             <Border DockPanel.Dock="Top"
                     Background="{DynamicResource SystemControlBackgroundChromeMediumBrush}"
                     Padding="8,6">
-              <Grid ColumnDefinitions="*,Auto,8,Auto">
+              <Grid ColumnDefinitions="*,Auto">
                 <TextBlock Grid.Column="0"
                            Text="{Binding EntityDetail.EntityTitle}"
                            FontSize="15" FontWeight="SemiBold"
                            VerticalAlignment="Center" />
                 <Button Grid.Column="1" Content="Refresh"
                         Command="{Binding EntityDetail.RefreshSelectedEntityCommand}" />
-                <Button Grid.Column="3" Content="Send…"
-                        Command="{Binding EntityDetail.ToggleSendPanelCommand}"
-                        IsEnabled="{Binding EntityDetail.CanSendToEntity}" />
               </Grid>
             </Border>
 
@@ -310,6 +307,9 @@
                                 Command="{Binding EntityDetail.TogglePeekOptionsPanelCommand}"
                                 IsEnabled="{Binding EntityDetail.CanPeekMessages}"
                                 HorizontalAlignment="Left" />
+                        <Button Content="Send…"
+                                Command="{Binding EntityDetail.ToggleSendPanelCommand}"
+                                IsEnabled="{Binding EntityDetail.CanSendToEntity}" />
                         <Button Content="Purge"
                                 Command="{Binding EntityDetail.PurgeQueueCommand}"
                                 IsVisible="{Binding EntityDetail.IsQueueEntity}" />
