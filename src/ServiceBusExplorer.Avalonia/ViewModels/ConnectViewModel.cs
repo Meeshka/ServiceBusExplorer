@@ -2,6 +2,7 @@ using System;
 using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading.Tasks;
+using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ServiceBusExplorer.Core.Abstractions;
@@ -90,11 +91,19 @@ namespace ServiceBusExplorer.Avalonia.ViewModels
 
         // ── Entity selection ──────────────────────────────────────────────────────────────
 
-        [ObservableProperty] private bool _selectQueues           = true;
-        [ObservableProperty] private bool _selectTopics           = true;
-        [ObservableProperty] private bool _selectEventHubs        = false;
-        [ObservableProperty] private bool _selectNotificationHubs = false;
-        [ObservableProperty] private bool _selectRelays           = false;
+        [ObservableProperty] private bool _selectQueues    = true;
+        [ObservableProperty] private bool _selectTopics    = true;
+        [ObservableProperty] private bool _selectEventHubs = false;
+
+        [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(IsNotificationHubNameVisible))]
+        private bool _selectNotificationHubs = false;
+
+        [ObservableProperty] private bool _selectRelays = false;
+
+        [ObservableProperty] private string _notificationHubName = string.Empty;
+
+        public bool IsNotificationHubNameVisible => SelectNotificationHubs;
 
         // ── OData filters ─────────────────────────────────────────────────────────────────
 
@@ -176,8 +185,8 @@ namespace ServiceBusExplorer.Avalonia.ViewModels
                 {
                     profile.Name        = SaveConnectionName.Trim();
                     profile.UserCreated = true;
-                    await _savedConnectionsService.SaveAsync(profile).ConfigureAwait(false);
-                    await LoadSavedConnectionsAsync().ConfigureAwait(false);
+                    await _savedConnectionsService.SaveAsync(profile);
+                    await LoadSavedConnectionsAsync();
                 }
 
                 _onConnect(profile);
@@ -209,8 +218,8 @@ namespace ServiceBusExplorer.Avalonia.ViewModels
         private async Task DeleteSelectedConnection()
         {
             if (SelectedConnection?.Name == null) return;
-            await _savedConnectionsService.DeleteAsync(SelectedConnection.Name).ConfigureAwait(false);
-            await LoadSavedConnectionsAsync().ConfigureAwait(false);
+            await _savedConnectionsService.DeleteAsync(SelectedConnection.Name);
+            await LoadSavedConnectionsAsync();
             SelectedConnection = null;
         }
 
@@ -235,12 +244,12 @@ namespace ServiceBusExplorer.Avalonia.ViewModels
         private async Task LoadSavedConnectionsAsync()
         {
             var all = await _savedConnectionsService.GetAllAsync().ConfigureAwait(false);
-            // Must update on UI thread — Avalonia's ObservableCollection is UI-thread-bound.
-            // ViewModelBase runs on the thread that built the object; this is safe for the
-            // initial load. A dispatcher marshal is added for background refreshes.
-            SavedConnections.Clear();
-            foreach (var p in all)
-                SavedConnections.Add(p);
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                SavedConnections.Clear();
+                foreach (var p in all)
+                    SavedConnections.Add(p);
+            });
         }
 
         /// <summary>Populates dialog fields from an existing saved profile.</summary>
@@ -253,6 +262,7 @@ namespace ServiceBusExplorer.Avalonia.ViewModels
             QueueFilter   = profile.QueueFilter ?? string.Empty;
             TopicFilter   = profile.TopicFilter ?? string.Empty;
             SubscriptionFilter = profile.SubscriptionFilter ?? string.Empty;
+            NotificationHubName = profile.EntityPath ?? string.Empty;
 
             if (profile.AuthMode == ConnectionAuthMode.Sas)
                 ConnectionString = profile.ConnectionString ?? string.Empty;
@@ -308,6 +318,9 @@ namespace ServiceBusExplorer.Avalonia.ViewModels
                     break;
             }
 
+            if (SelectNotificationHubs && !string.IsNullOrWhiteSpace(NotificationHubName))
+                profile.EntityPath = NotificationHubName.Trim();
+
             return profile;
         }
 
@@ -335,4 +348,3 @@ namespace ServiceBusExplorer.Avalonia.ViewModels
         }
     }
 }
-

@@ -149,6 +149,16 @@ namespace ServiceBusExplorer.Avalonia.ViewModels
                 var topicRoot = tree.FirstOrDefault(n => n.Label == "Topics");
                 var topicCount = topicRoot != null ? CountEntities(topicRoot, EntityKind.Topic) : 0;
 
+                var notificationHubRoot = tree.FirstOrDefault(n => n.Label == "Notification Hubs");
+                var notificationHubCount = notificationHubRoot != null ? CountEntities(notificationHubRoot, EntityKind.NotificationHub) : 0;
+                var statusParts = new List<string>();
+                if (queueRoot != null)
+                    statusParts.Add($"{queueCount} queue(s)");
+                if (topicRoot != null)
+                    statusParts.Add($"{topicCount} topic(s)");
+                if (notificationHubRoot != null)
+                    statusParts.Add($"{notificationHubCount} notification hub(s)");
+
                 await Dispatcher.UIThread.InvokeAsync(() =>
                 {
                     Nodes.Clear();
@@ -158,7 +168,7 @@ namespace ServiceBusExplorer.Avalonia.ViewModels
                         Nodes.Add(vm);
                     }
 
-                    StatusText = $"{queueCount} queue(s), {topicCount} topic(s)";
+                    StatusText = statusParts.Count > 0 ? string.Join(", ", statusParts) : "No selected entity types loaded.";
                 });
             }
             catch (OperationCanceledException)

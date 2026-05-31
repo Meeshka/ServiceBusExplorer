@@ -14,18 +14,36 @@ using CoreEntityStatus = ServiceBusExplorer.Core.Models.EntityStatus;
 using CoreQueueProps   = ServiceBusExplorer.Core.Models.QueueProperties;
 using CoreTopicProps   = ServiceBusExplorer.Core.Models.TopicProperties;
 using CoreSubProps     = ServiceBusExplorer.Core.Models.SubscriptionProperties;
+using NotificationHubDescription = Microsoft.Azure.NotificationHubs.NotificationHubDescription;
+using NotificationHubNamespaceManager = Microsoft.Azure.NotificationHubs.NamespaceManager;
 
 namespace ServiceBusExplorer.Core.Services
 {
     public sealed class ModernNamespaceService : INamespaceService
     {
         private readonly ServiceBusAdministrationClient _admin;
+        private readonly HashSet<string> _selectedEntities;
+        private readonly NotificationHubNamespaceManager? _notificationHubNamespaceManager;
+        private readonly string? _notificationHubEntityPath;
 
-        public ModernNamespaceService(string connectionString)
-            => _admin = new ServiceBusAdministrationClient(connectionString);
+        public ModernNamespaceService(string connectionString, IEnumerable<string>? selectedEntities = null, string? entityPath = null)
+        {
+            _admin = new ServiceBusAdministrationClient(connectionString);
+            _selectedEntities = CreateSelectedEntitySet(selectedEntities);
+            _notificationHubEntityPath = NullIfWhiteSpace(entityPath);
 
-        public ModernNamespaceService(string fullyQualifiedNamespace, TokenCredential credential)
-            => _admin = new ServiceBusAdministrationClient(fullyQualifiedNamespace, credential);
+            if (IsSelected(EntityTypeConstants.NotificationHubs))
+            {
+                var notificationHubConnectionString = RemoveConnectionStringKeys(connectionString, "TransportType", "EntityPath");
+                _notificationHubNamespaceManager = NotificationHubNamespaceManager.CreateFromConnectionString(notificationHubConnectionString);
+            }
+        }
+
+        public ModernNamespaceService(string fullyQualifiedNamespace, TokenCredential credential, IEnumerable<string>? selectedEntities = null)
+        {
+            _admin = new ServiceBusAdministrationClient(fullyQualifiedNamespace, credential);
+            _selectedEntities = CreateSelectedEntitySet(selectedEntities);
+        }
 
         public static ModernNamespaceService FromProfile(ConnectionProfile profile)
         {
@@ -34,11 +52,11 @@ namespace ServiceBusExplorer.Core.Services
                 if (string.IsNullOrWhiteSpace(profile.FullyQualifiedNamespace))
                     throw new ArgumentException("FullyQualifiedNamespace is required for AAD auth.");
                 var credential = AadTokenCredentialFactory.Create(profile.TenantId);
-                return new ModernNamespaceService(profile.FullyQualifiedNamespace!, credential);
+                return new ModernNamespaceService(profile.FullyQualifiedNamespace!, credential, profile.SelectedEntities);
             }
             if (string.IsNullOrWhiteSpace(profile.ConnectionString))
                 throw new ArgumentException("ConnectionString is required for SAS auth.");
-            return new ModernNamespaceService(profile.ConnectionString!);
+            return new ModernNamespaceService(profile.ConnectionString!, profile.SelectedEntities, profile.EntityPath);
         }
 
         // Queues
@@ -99,6 +117,47 @@ namespace ServiceBusExplorer.Core.Services
             await foreach (var p in _admin.GetSubscriptionsRuntimePropertiesAsync(topicPath, ct))
                 results.Add(MapSubscription(topicPath, p));
             return results;
+        }
+
+        // Notification Hubs
+
+        public async Task<IReadOnlyList<EntityInfo>> GetNotificationHubsAsync(CancellationToken ct = default)
+        {
+            if (_notificationHubNamespaceManager == null)
+                throw new NotSupportedException("Notification Hubs discovery currently requires a SAS connection string.");
+
+            try
+            {
+                IEnumerable<NotificationHubDescription> hubs;
+                if (!string.IsNullOrWhiteSpace(_notificationHubEntityPath))
+                {
+                    var hub = await _notificationHubNamespaceManager
+                        .GetNotificationHubAsync(_notificationHubEntityPath!, ct)
+                        .ConfigureAwait(false);
+                    hubs = new[] { hub };
+                }
+                else
+                {
+                    hubs = await _notificationHubNamespaceManager
+                        .GetNotificationHubsAsync(ct)
+                        .ConfigureAwait(false);
+                }
+
+                return hubs
+                    .Select(MapNotificationHub)
+                    .OrderBy(h => h.Name, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException(
+                    "Unable to load Notification Hubs. Use a Notification Hubs namespace or hub SAS connection string with Manage permission.",
+                    ex);
+            }
         }
 
         public async Task<EntityInfo> CreateSubscriptionAsync(string topicPath, string name, CancellationToken ct = default)
@@ -284,30 +343,54 @@ namespace ServiceBusExplorer.Core.Services
         public async Task<IReadOnlyList<EntityTreeNode>> GetEntityTreeAsync(CancellationToken ct = default)
         {
             var root = new List<EntityTreeNode>();
-            var queues    = await GetQueuesAsync(ct: ct).ConfigureAwait(false);
-            var queueNode = new EntityTreeNode { Label = "Queues", Kind = EntityKind.Queue };
-            foreach (var q in queues.OrderBy(q => q.Name, StringComparer.OrdinalIgnoreCase))
-                AddQueueNode(queueNode, q);
-            SortChildrenFoldersFirst(queueNode);
-            root.Add(queueNode);
 
-            var topics     = await GetTopicsAsync(ct: ct).ConfigureAwait(false);
-            var topicsNode = new EntityTreeNode { Label = "Topics", Kind = EntityKind.Topic };
-            foreach (var t in topics.OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase))
+            if (IsSelected(EntityTypeConstants.Queues))
             {
-                var topicNode = new EntityTreeNode { Label = t.Name, Kind = EntityKind.Topic, Entity = t };
-                try
-                {
-                    var subs = await GetSubscriptionsAsync(t.Name, ct).ConfigureAwait(false);
-                    foreach (var s in subs.OrderBy(s => s.Name))
-                        topicNode.Children.Add(new EntityTreeNode { Label = s.Name, Kind = EntityKind.Subscription, Entity = s });
-                }
-                catch (RequestFailedException) { }
-
-                AddTopicNode(topicsNode, topicNode);
+                var queues = await GetQueuesAsync(ct: ct).ConfigureAwait(false);
+                var queueNode = new EntityTreeNode { Label = "Queues", Kind = EntityKind.Queue };
+                foreach (var q in queues.OrderBy(q => q.Name, StringComparer.OrdinalIgnoreCase))
+                    AddQueueNode(queueNode, q);
+                SortChildrenFoldersFirst(queueNode);
+                root.Add(queueNode);
             }
-            SortChildrenFoldersFirst(topicsNode);
-            root.Add(topicsNode);
+
+            if (IsSelected(EntityTypeConstants.Topics))
+            {
+                var topics = await GetTopicsAsync(ct: ct).ConfigureAwait(false);
+                var topicsNode = new EntityTreeNode { Label = "Topics", Kind = EntityKind.Topic };
+                foreach (var t in topics.OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase))
+                {
+                    var topicNode = new EntityTreeNode { Label = t.Name, Kind = EntityKind.Topic, Entity = t };
+                    try
+                    {
+                        var subs = await GetSubscriptionsAsync(t.Name, ct).ConfigureAwait(false);
+                        foreach (var s in subs.OrderBy(s => s.Name))
+                            topicNode.Children.Add(new EntityTreeNode { Label = s.Name, Kind = EntityKind.Subscription, Entity = s });
+                    }
+                    catch (RequestFailedException) { }
+
+                    AddTopicNode(topicsNode, topicNode);
+                }
+                SortChildrenFoldersFirst(topicsNode);
+                root.Add(topicsNode);
+            }
+
+            if (IsSelected(EntityTypeConstants.NotificationHubs))
+            {
+                var notificationHubs = await GetNotificationHubsAsync(ct).ConfigureAwait(false);
+                var notificationHubsNode = new EntityTreeNode { Label = "Notification Hubs", Kind = EntityKind.NotificationHub };
+                foreach (var hub in notificationHubs)
+                {
+                    notificationHubsNode.Children.Add(new EntityTreeNode
+                    {
+                        Label = hub.Name,
+                        Kind = EntityKind.NotificationHub,
+                        Entity = hub
+                    });
+                }
+                root.Add(notificationHubsNode);
+            }
+
             return root;
         }
 
@@ -460,6 +543,44 @@ namespace ServiceBusExplorer.Core.Services
             TransferDeadLetterMessageCount = p.TransferDeadLetterMessageCount,
             TotalMessageCount              = p.TotalMessageCount
         };
+
+        private static EntityInfo MapNotificationHub(NotificationHubDescription p) => new EntityInfo
+        {
+            Kind = EntityKind.NotificationHub,
+            Name = p.Path
+        };
+
+        private bool IsSelected(string entityType) => _selectedEntities.Contains(entityType);
+
+        private static HashSet<string> CreateSelectedEntitySet(IEnumerable<string>? selectedEntities)
+        {
+            return new HashSet<string>(
+                selectedEntities ?? new[] { EntityTypeConstants.Queues, EntityTypeConstants.Topics },
+                StringComparer.OrdinalIgnoreCase);
+        }
+
+        private static string? NullIfWhiteSpace(string? value)
+        {
+            return string.IsNullOrWhiteSpace(value) ? null : value!.Trim();
+        }
+
+        private static string RemoveConnectionStringKeys(string connectionString, params string[] keysToRemove)
+        {
+            var keys = new HashSet<string>(keysToRemove, StringComparer.OrdinalIgnoreCase);
+            var parts = connectionString
+                .Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries)
+                .Where(part =>
+                {
+                    var separatorIndex = part.IndexOf('=');
+                    if (separatorIndex <= 0)
+                        return true;
+
+                    var key = part.Substring(0, separatorIndex).Trim();
+                    return !keys.Contains(key);
+                });
+
+            return string.Join(";", parts);
+        }
 
         private static CoreEntityStatus MapStatus(SdkEntityStatus s)
         {

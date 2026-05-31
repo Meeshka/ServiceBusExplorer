@@ -1,6 +1,7 @@
 using System;
 using Avalonia.Controls;
 using Avalonia.Interactivity;
+using Avalonia.Threading;
 using ServiceBusExplorer.Avalonia.ViewModels;
 
 namespace ServiceBusExplorer.Avalonia.Views
@@ -30,11 +31,10 @@ namespace ServiceBusExplorer.Avalonia.Views
         }
 
         private void OnConnectionEstablished(object? sender, EventArgs e)
-            => Close();
+            => Dispatcher.UIThread.Post(Close);
 
         /// <summary>Click handler for the Cancel button (no ViewModel command needed).</summary>
         private void OnCancelClicked(object? sender, RoutedEventArgs e)
             => Close();
     }
 }
-
