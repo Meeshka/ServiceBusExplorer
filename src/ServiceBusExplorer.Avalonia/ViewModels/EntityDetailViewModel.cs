@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Threading;
@@ -57,7 +59,7 @@ namespace ServiceBusExplorer.Avalonia.ViewModels
         public string ShownMessagesLabel => $"Shown messages: {Messages.Count}";
 
         partial void OnSelectedMessageChanged(ServiceBusMessageData? value)
-            => MessageBody = value?.Body ?? string.Empty;
+            => MessageBody = BuildMessageDetails(value);
 
         // ── Dead-letter message list ──────────────────────────────────────────────────────
 
@@ -68,7 +70,7 @@ namespace ServiceBusExplorer.Avalonia.ViewModels
         public string ShownDeadLetterMessagesLabel => $"Shown messages: {DeadLetterMessages.Count}";
 
         partial void OnSelectedDeadLetterMessageChanged(ServiceBusMessageData? value)
-            => DeadLetterMessageBody = value?.Body ?? string.Empty;
+            => DeadLetterMessageBody = BuildMessageDetails(value);
 
         // ── Overview / output ─────────────────────────────────────────────────────────────
 
@@ -101,6 +103,8 @@ namespace ServiceBusExplorer.Avalonia.ViewModels
         private string _sendBody = string.Empty;
 
         [ObservableProperty] private string _sendMessageId  = string.Empty;
+        [ObservableProperty] private string _sendCorrelationId = string.Empty;
+        [ObservableProperty] private string _sendMetadata   = string.Empty;
         [ObservableProperty] private int    _sendCount      = 1;
         [ObservableProperty] private bool   _showSendPanel  = false;
 
@@ -626,6 +630,10 @@ namespace ServiceBusExplorer.Avalonia.ViewModels
 
             try
             {
+                var properties = ParseMetadata(SendMetadata);
+                var correlationId = string.IsNullOrWhiteSpace(SendCorrelationId)
+                    ? TakeMetadataString(properties, nameof(ServiceBusMessageData.CorrelationId))
+                    : SendCorrelationId.Trim();
                 var tasks = new List<Task>();
                 for (int i = 0; i < Math.Max(1, SendCount); i++)
                 {
@@ -634,7 +642,9 @@ namespace ServiceBusExplorer.Avalonia.ViewModels
                         Body      = SendBody,
                         MessageId = string.IsNullOrWhiteSpace(SendMessageId)
                             ? Guid.NewGuid().ToString()
-                            : SendCount > 1 ? $"{SendMessageId}-{i + 1}" : SendMessageId
+                            : SendCount > 1 ? $"{SendMessageId}-{i + 1}" : SendMessageId,
+                        CorrelationId = correlationId,
+                        Properties = new Dictionary<string, object>(properties)
                     }));
                 }
 
@@ -660,6 +670,130 @@ namespace ServiceBusExplorer.Avalonia.ViewModels
         }
 
         private bool CanSend() => CanSendToEntity && !string.IsNullOrWhiteSpace(SendBody) && !IsBusy;
+
+        private static string BuildMessageDetails(ServiceBusMessageData? message)
+        {
+            if (message == null)
+                return string.Empty;
+
+            var builder = new StringBuilder();
+            builder.AppendLine("System Properties:");
+            builder.AppendLine($"MessageId: {ValueOrNone(message.MessageId)}");
+            builder.AppendLine($"CorrelationId: {ValueOrNone(message.CorrelationId)}");
+            builder.AppendLine($"SessionId: {ValueOrNone(message.SessionId)}");
+            builder.AppendLine($"Label: {ValueOrNone(message.Label)}");
+            builder.AppendLine($"ContentType: {ValueOrNone(message.ContentType)}");
+            builder.AppendLine($"SequenceNumber: {message.SequenceNumber}");
+            builder.AppendLine($"DeliveryCount: {message.DeliveryCount}");
+            builder.AppendLine($"EnqueuedTime: {ValueOrNone(message.EnqueuedTime)}");
+            builder.AppendLine($"ExpiresAtUtc: {ValueOrNone(message.ExpiresAtUtc)}");
+            if (!string.IsNullOrWhiteSpace(message.DeadLetterReason))
+                builder.AppendLine($"DeadLetterReason: {message.DeadLetterReason}");
+
+            builder.AppendLine();
+            builder.AppendLine("Metadata:");
+            if (message.Properties.Count == 0)
+            {
+                builder.AppendLine("(none)");
+            }
+            else
+            {
+                foreach (var property in message.Properties)
+                    builder.AppendLine($"{property.Key}: {property.Value}");
+            }
+
+            builder.AppendLine();
+            builder.AppendLine("Body:");
+            builder.Append(message.Body ?? string.Empty);
+            return builder.ToString();
+        }
+
+        private static string? TakeMetadataString(Dictionary<string, object> metadata, string key)
+        {
+            string? matchingKey = null;
+            foreach (var property in metadata)
+            {
+                if (string.Equals(property.Key, key, StringComparison.OrdinalIgnoreCase))
+                {
+                    matchingKey = property.Key;
+                    break;
+                }
+            }
+
+            if (matchingKey == null)
+                return null;
+
+            var value = Convert.ToString(metadata[matchingKey]);
+            metadata.Remove(matchingKey);
+            return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+        }
+
+        private static string ValueOrNone(object? value)
+            => value == null || string.IsNullOrWhiteSpace(Convert.ToString(value))
+                ? "(none)"
+                : Convert.ToString(value)!;
+
+        private static Dictionary<string, object> ParseMetadata(string metadata)
+        {
+            var result = new Dictionary<string, object>();
+            if (string.IsNullOrWhiteSpace(metadata))
+                return result;
+
+            var trimmed = metadata.Trim();
+            if (trimmed.StartsWith("{", StringComparison.Ordinal))
+            {
+                using var document = JsonDocument.Parse(trimmed);
+                if (document.RootElement.ValueKind != JsonValueKind.Object)
+                    throw new FormatException("Metadata JSON must be an object.");
+
+                foreach (var property in document.RootElement.EnumerateObject())
+                {
+                    if (property.Value.ValueKind == JsonValueKind.Null)
+                        continue;
+
+                    result[property.Name] = ConvertMetadataValue(property.Value);
+                }
+
+                return result;
+            }
+
+            var lines = metadata.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (var line in lines)
+            {
+                var index = line.IndexOf('=');
+                if (index <= 0)
+                    throw new FormatException("Metadata lines must use key=value format, or provide a JSON object.");
+
+                var key = line.Substring(0, index).Trim();
+                if (key.Length == 0)
+                    throw new FormatException("Metadata keys cannot be empty.");
+
+                result[key] = line.Substring(index + 1).Trim();
+            }
+
+            return result;
+        }
+
+        private static object ConvertMetadataValue(JsonElement value)
+        {
+            switch (value.ValueKind)
+            {
+                case JsonValueKind.String:
+                    return value.GetString() ?? string.Empty;
+                case JsonValueKind.Number:
+                    if (value.TryGetInt64(out var integer))
+                        return integer;
+                    if (value.TryGetDecimal(out var dec))
+                        return dec;
+                    return value.GetDouble();
+                case JsonValueKind.True:
+                    return true;
+                case JsonValueKind.False:
+                    return false;
+                default:
+                    throw new FormatException("Metadata values must be strings, numbers, booleans, or null.");
+            }
+        }
 
         [RelayCommand]
         private void ToggleSendPanel()

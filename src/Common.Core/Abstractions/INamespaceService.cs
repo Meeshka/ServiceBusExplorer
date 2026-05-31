@@ -17,8 +17,9 @@ namespace ServiceBusExplorer.Core.Abstractions
         Task<IReadOnlyList<EntityInfo>> GetQueuesAsync(string? filter = null, CancellationToken ct = default);
         Task<IReadOnlyList<EntityInfo>> GetTopicsAsync(string? filter = null, CancellationToken ct = default);
         Task<IReadOnlyList<EntityInfo>> GetSubscriptionsAsync(string topicPath, CancellationToken ct = default);
+        Task<IReadOnlyList<EntityInfo>> GetNotificationHubsAsync(CancellationToken ct = default);
 
-        /// <summary>Loads the full entity tree (queues + topics + subscriptions).</summary>
+        /// <summary>Loads the selected namespace entity tree.</summary>
         Task<IReadOnlyList<EntityTreeNode>> GetEntityTreeAsync(CancellationToken ct = default);
 
         // ── Queue CRUD ─────────────────────────────────────────────────────────────────────
@@ -48,4 +49,3 @@ namespace ServiceBusExplorer.Core.Abstractions
         Task<EntityInfo> CreateSubscriptionWithOptionsAsync(SubscriptionProperties props, CancellationToken ct = default);
     }
 }
-
